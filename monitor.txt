@@ -1,0 +1,43 @@
+import psutil
+import time
+import sqlite3
+from datetime import datetime
+
+# Connect to database
+conn = sqlite3.connect("system_monitor.db")
+cursor = conn.cursor()
+
+# Create table
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS system_stats (
+    timestamp TEXT,
+    cpu REAL,
+    memory REAL,
+    disk REAL
+)
+""")
+
+conn.commit()
+
+while True:
+    cpu = psutil.cpu_percent(interval=1)
+    memory = psutil.virtual_memory().percent
+    disk = psutil.disk_usage('/').percent
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Insert data into database
+    cursor.execute("""
+    INSERT INTO system_stats (timestamp, cpu, memory, disk)
+    VALUES (?, ?, ?, ?)
+    """, (timestamp, cpu, memory, disk))
+
+    conn.commit()
+
+    print(f"Time: {timestamp}")
+    print(f"CPU Usage: {cpu}%")
+    print(f"Memory Usage: {memory}%")
+    print(f"Disk Usage: {disk}%")
+    print("---------------------------")
+
+    time.sleep(3)
