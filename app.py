@@ -1,11 +1,11 @@
 import threading
-import random
 import time
 import psutil
 
 from datetime import datetime
-from sklearn.ensemble import RandomForestRegressor
+
 from sklearn.ensemble import IsolationForest
+from xgboost import XGBRegressor
 
 from streamlit_autorefresh import st_autorefresh
 
@@ -13,6 +13,15 @@ import matplotlib.pyplot as plt
 import streamlit as st
 import pandas as pd
 import sqlite3
+
+# -----------------------------------
+# PAGE CONFIG
+# -----------------------------------
+
+st.set_page_config(
+    page_title="Real-Time System Monitoring",
+    layout="wide"
+)
 
 # -----------------------------------
 # BACKGROUND TELEMETRY COLLECTION
@@ -26,6 +35,18 @@ def collect_metrics():
     )
 
     cursor = conn.cursor()
+
+    # Create table if not exists
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS system_stats (
+        timestamp TEXT,
+        cpu REAL,
+        memory REAL,
+        disk REAL
+    )
+    """)
+
+    conn.commit()
 
     while True:
 
@@ -49,62 +70,8 @@ def collect_metrics():
 
         time.sleep(3)
 
-
 # -----------------------------------
-# BACKGROUND LOG GENERATION
-# -----------------------------------
-
-def generate_logs():
-
-    conn = sqlite3.connect(
-        "system_monitor.db",
-        check_same_thread=False
-    )
-
-    cursor = conn.cursor()
-
-    log_levels = [
-        "INFO",
-        "WARNING",
-        "ERROR",
-        "CRITICAL"
-    ]
-
-    log_messages = [
-        "User login successful",
-        "High memory usage detected",
-        "Database timeout occurred",
-        "Failed login attempt",
-        "API response delayed",
-        "Disk nearing capacity",
-        "Network timeout detected",
-        "Service temporarily unavailable",
-        "CPU spike detected",
-        "Application restarted"
-    ]
-
-    while True:
-
-        timestamp = datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-
-        level = random.choice(log_levels)
-
-        message = random.choice(log_messages)
-
-        cursor.execute("""
-        INSERT INTO logs
-        (timestamp, level, message)
-        VALUES (?, ?, ?)
-        """, (timestamp, level, message))
-
-        conn.commit()
-
-        time.sleep(3)
-
-# -----------------------------------
-# START BACKGROUND THREADS
+# START BACKGROUND THREAD
 # -----------------------------------
 
 if 'threads_started' not in st.session_state:
@@ -114,50 +81,74 @@ if 'threads_started' not in st.session_state:
         daemon=True
     )
 
-    log_thread = threading.Thread(
-        target=generate_logs,
-        daemon=True
-    )
-
     telemetry_thread.start()
-
-    log_thread.start()
 
     st.session_state['threads_started'] = True
 
 # -----------------------------------
-# PAGE CONFIG
+# TITLE
 # -----------------------------------
 
-st.title("AI System Monitoring Dashboard")
+st.title(
+    "Real-Time System Monitoring & ML-Based Forecasting Dashboard"
+)
 
-# Auto refresh every 3 seconds
-st_autorefresh(interval=3000, key="datarefresh")
+# -----------------------------------
+# AUTO REFRESH
+# -----------------------------------
+
+st_autorefresh(
+    interval=5000,
+    key="datarefresh"
+)
 
 # -----------------------------------
 # DATABASE CONNECTION
 # -----------------------------------
 
-conn = sqlite3.connect("system_monitor.db")
+conn = sqlite3.connect(
+    "system_monitor.db"
+)
 
 query = "SELECT * FROM system_stats"
 
 df = pd.read_sql_query(query, conn)
 
-# Keep latest 100 rows only
-df = df.tail(100)
+# -----------------------------------
+# DATASETS
+# -----------------------------------
+
+# Smaller optimized ML dataset
+train_df = df.tail(1500).copy()
+
+# Dashboard display dataset
+display_df = df.tail(100).copy()
+
+# -----------------------------------
+# HANDLE EMPTY DATA
+# -----------------------------------
+
+if train_df.empty:
+
+    st.error(
+        "No telemetry data available yet."
+    )
+
+    st.stop()
 
 # -----------------------------------
 # LATEST METRICS
 # -----------------------------------
 
 st.subheader("Latest System Metrics")
-st.write(df.tail())
+
+st.write(display_df.tail())
+
 # -----------------------------------
 # TELEMETRY FRESHNESS CHECK
 # -----------------------------------
 
-latest_timestamp = df['timestamp'].iloc[-1]
+latest_timestamp = train_df['timestamp'].iloc[-1]
 
 latest_time = datetime.strptime(
     latest_timestamp,
@@ -166,12 +157,10 @@ latest_time = datetime.strptime(
 
 current_time = datetime.now()
 
-# Time difference in seconds
 time_diff = (
     current_time - latest_time
 ).total_seconds()
 
-# Detect stale telemetry
 if time_diff > 10:
 
     st.error(
@@ -184,18 +173,22 @@ else:
     st.success(
         "✅ Telemetry stream active."
     )
+
 # -----------------------------------
 # LIVE MONITORING GRAPHS
 # -----------------------------------
 
 st.subheader("CPU Usage Over Time")
-st.line_chart(df["cpu"])
+
+st.line_chart(display_df["cpu"])
 
 st.subheader("Memory Usage Over Time")
-st.line_chart(df["memory"])
+
+st.line_chart(display_df["memory"])
 
 st.subheader("Disk Usage Over Time")
-st.line_chart(df["disk"])
+
+st.line_chart(display_df["disk"])
 
 # -----------------------------------
 # ANOMALY DETECTION
@@ -203,19 +196,28 @@ st.line_chart(df["disk"])
 
 st.subheader("Anomaly Detection")
 
-features = df[['cpu', 'memory']]
+features = train_df[['cpu', 'memory']]
 
 anomaly_model = IsolationForest(
-    contamination=0.1,
-    random_state=42
+    n_estimators=40,
+    contamination=0.03,
+    random_state=42,
+    n_jobs=-1
 )
 
-df['anomaly'] = anomaly_model.fit_predict(features)
+train_df['anomaly'] = anomaly_model.fit_predict(
+    features
+)
 
-anomalies = df[df['anomaly'] == -1]
+anomalies = train_df[
+    train_df['anomaly'] == -1
+]
 
 st.write("Detected System Anomalies")
-st.write(anomalies)
+
+st.write(
+    anomalies.tail(10)
+)
 
 # -----------------------------------
 # PREDICTIVE ANALYTICS
@@ -223,77 +225,134 @@ st.write(anomalies)
 
 st.subheader("Predictive Analytics")
 
-# Create lag features
-df['cpu_lag1'] = df['cpu'].shift(1)
-df['cpu_lag2'] = df['cpu'].shift(2)
-df['cpu_lag3'] = df['cpu'].shift(3)
+# Lag Features
+train_df['cpu_lag1'] = (
+    train_df['cpu'].shift(1)
+)
 
-# Remove empty rows
-df = df.dropna()
+train_df['cpu_lag2'] = (
+    train_df['cpu'].shift(2)
+)
 
-# Features and target
-X = df[['cpu_lag1', 'cpu_lag2', 'cpu_lag3']]
+train_df['cpu_lag3'] = (
+    train_df['cpu'].shift(3)
+)
 
-y = df['cpu']
+# Rolling Mean Feature
+train_df['cpu_rolling_mean'] = (
+    train_df['cpu']
+    .rolling(window=5)
+    .mean()
+)
+
+# Drop missing rows
+train_df = train_df.dropna()
 
 # -----------------------------------
-# TRAIN RANDOM FOREST MODEL
+# ENSURE ENOUGH DATA
 # -----------------------------------
 
-prediction_model = RandomForestRegressor(
-    n_estimators=100,
-    random_state=42
+if len(train_df) < 20:
+
+    st.warning(
+        "Not enough telemetry history "
+        "for forecasting yet."
+    )
+
+    st.stop()
+
+# -----------------------------------
+# FEATURES AND TARGET
+# -----------------------------------
+
+X = train_df[[
+    'cpu_lag1',
+    'cpu_lag2',
+    'cpu_lag3',
+    'cpu_rolling_mean'
+]]
+
+y = train_df['cpu']
+
+# -----------------------------------
+# TRAIN XGBOOST MODEL
+# -----------------------------------
+
+prediction_model = XGBRegressor(
+    n_estimators=60,
+    learning_rate=0.08,
+    max_depth=4,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    random_state=42,
+    n_jobs=-1
 )
 
 prediction_model.fit(X, y)
 
 # -----------------------------------
-# PREDICT NEXT CPU VALUE
+# NEXT CPU PREDICTION
 # -----------------------------------
 
 latest_features = [[
-    df['cpu'].iloc[-1],
-    df['cpu'].iloc[-2],
-    df['cpu'].iloc[-3]
+    train_df['cpu'].iloc[-1],
+    train_df['cpu'].iloc[-2],
+    train_df['cpu'].iloc[-3],
+    train_df['cpu'].tail(5).mean()
 ]]
 
-predicted_cpu = prediction_model.predict(latest_features)[0]
+predicted_cpu = prediction_model.predict(
+    latest_features
+)[0]
 
-# Display prediction
 st.write(
-    f"Predicted CPU Usage (Next Interval): {predicted_cpu:.2f}%"
+    f"Predicted CPU Usage "
+    f"(Next Interval): "
+    f"{predicted_cpu:.2f}%"
 )
 
 # -----------------------------------
-# CPU PREDICTION GRAPH
+# CPU FORECAST GRAPH
 # -----------------------------------
 
 st.subheader("CPU Prediction Graph")
 
-actual_cpu = df['cpu'].tolist()
+actual_cpu = display_df['cpu'].tolist()
 
-# Start with latest CPU values
-last_values = actual_cpu[-3:]
+last_values = train_df['cpu'].tolist()[-5:]
 
 future_predictions = []
 
-# Predict next 5 future CPU values
 for i in range(5):
 
-    # Use previous CPU values
-    future_input = [last_values[-3:]]
+    rolling_mean = (
+        sum(last_values[-5:]) / 5
+    )
 
-    # Predict next CPU
-    future_pred = prediction_model.predict(future_input)[0]
+    future_input = [[
+        last_values[-1],
+        last_values[-2],
+        last_values[-3],
+        rolling_mean
+    ]]
 
-    future_predictions.append(future_pred)
+    future_pred = prediction_model.predict(
+        future_input
+    )[0]
 
-    # Feed prediction back into history
-    last_values.append(future_pred)
+    future_predictions.append(
+        future_pred
+    )
 
-# Future x-axis
+    last_values.append(
+        future_pred
+    )
+
 future_x = list(
-    range(len(actual_cpu), len(actual_cpu) + 5)
+    range(
+        len(actual_cpu),
+        len(actual_cpu) + 5
+    )
 )
 
 # -----------------------------------
@@ -302,14 +361,14 @@ future_x = list(
 
 fig, ax = plt.subplots()
 
-# Actual CPU usage
+# Actual CPU
 ax.plot(
     range(len(actual_cpu)),
     actual_cpu,
     label="Actual CPU Usage"
 )
 
-# Predicted future CPU
+# Predicted CPU
 ax.plot(
     future_x,
     future_predictions,
@@ -319,241 +378,139 @@ ax.plot(
     label='Predicted Future CPU'
 )
 
-# Connect actual to prediction
+# Connect line
 ax.plot(
     [len(actual_cpu)-1, future_x[0]],
-    [actual_cpu[-1], future_predictions[0]],
+    [
+        actual_cpu[-1],
+        future_predictions[0]
+    ],
     linestyle='dashed',
     color='red'
 )
 
-# Labels
 ax.set_xlabel("Time")
+
 ax.set_ylabel("CPU Usage (%)")
-ax.set_title("5-Step CPU Forecast")
+
+ax.set_title("CPU Forecast")
 
 ax.legend()
 
-# Show graph
 st.pyplot(fig)
 
-# IMPORTANT MEMORY FIX
+# Memory fix
 plt.close(fig)
 
-latest_cpu = df['cpu'].iloc[-1]
-latest_memory = df['memory'].iloc[-1]
+# -----------------------------------
+# LATEST VALUES
+# -----------------------------------
+
+latest_cpu = train_df['cpu'].iloc[-1]
+
+latest_memory = train_df['memory'].iloc[-1]
+
 # -----------------------------------
 # PREDICTION ALERT
 # -----------------------------------
 
 if predicted_cpu > 80:
-    st.error("⚠ Potential CPU overload risk detected!")
+
+    st.error(
+        "⚠ Potential CPU overload "
+        "risk detected!"
+    )
 
 # -----------------------------------
 # SYSTEM HEALTH SCORE
 # -----------------------------------
 
-st.subheader("System Health Score")
+st.subheader(
+    "System Health Score"
+)
 
 health_score = 100
 
-# Reduce score for high CPU
 health_score -= latest_cpu * 0.3
 
-# Reduce score for high memory
 health_score -= latest_memory * 0.2
 
-# Reduce score if anomalies exist
 if not anomalies.empty:
+
     health_score -= 15
 
-# Reduce score for dangerous predictions
 if predicted_cpu > 80:
+
     health_score -= 20
 
-# Prevent negative score
-health_score = max(0, round(health_score))
+health_score = max(
+    0,
+    round(health_score)
+)
 
-# Display health score
 if health_score >= 80:
-    st.success(f"🟢 System Health Score: {health_score}/100")
+
+    st.success(
+        f"🟢 System Health Score: "
+        f"{health_score}/100"
+    )
 
 elif health_score >= 50:
-    st.warning(f"🟡 System Health Score: {health_score}/100")
+
+    st.warning(
+        f"🟡 System Health Score: "
+        f"{health_score}/100"
+    )
 
 else:
-    st.error(f"🔴 System Health Score: {health_score}/100")
 
+    st.error(
+        f"🔴 System Health Score: "
+        f"{health_score}/100"
+    )
 
 # -----------------------------------
-# INTELLIGENT ALERTS
+# SYSTEM ALERTS
 # -----------------------------------
 
 st.subheader("System Alerts")
 
-latest_cpu = df['cpu'].iloc[-1]
-latest_memory = df['memory'].iloc[-1]
-
 # CPU Alert
 if latest_cpu > 80:
+
     st.error(
-        f"⚠ High CPU Usage Detected: {latest_cpu}%"
+        f"⚠ High CPU Usage Detected: "
+        f"{latest_cpu}%"
     )
 
 # Memory Alert
 if latest_memory > 80:
+
     st.warning(
-        f"⚠ High Memory Usage Detected: {latest_memory}%"
+        f"⚠ High Memory Usage Detected: "
+        f"{latest_memory}%"
     )
 
-# AI Anomaly Alert
+# Anomaly Alert
 if not anomalies.empty:
 
     latest_anomaly = anomalies.iloc[-1]
 
     anomaly_cpu = latest_anomaly['cpu']
+
     anomaly_memory = latest_anomaly['memory']
+
     anomaly_time = latest_anomaly['timestamp']
 
     st.error(
         f"""
-⚠ AI detected anomalous behaviour at {anomaly_time}
+⚠ Anomalous telemetry pattern detected at
+{anomaly_time}
 
 CPU Usage: {anomaly_cpu}%
 Memory Usage: {anomaly_memory}%
 
-The observed system behaviour deviates from learned normal operational patterns.
+The observed system behaviour deviates
+from learned operational patterns.
 """
-    )
-
-# -----------------------------------
-# LIVE LOG ANALYTICS
-# -----------------------------------
-
-st.subheader("Live System Logs")
-
-# Read logs table
-log_query = "SELECT * FROM logs ORDER BY timestamp DESC LIMIT 20"
-
-logs_df = pd.read_sql_query(log_query, conn)
-
-# Show logs
-st.dataframe(logs_df)
-
-# -----------------------------------
-# LOG INTELLIGENCE ANALYTICS
-# -----------------------------------
-
-st.subheader("Log Intelligence Analytics")
-
-# Count log severities
-error_count = len(
-    logs_df[logs_df['level'] == 'ERROR']
-)
-
-critical_count = len(
-    logs_df[logs_df['level'] == 'CRITICAL']
-)
-
-warning_count = len(
-    logs_df[logs_df['level'] == 'WARNING']
-)
-
-# Failed login detection
-failed_login_count = len(
-    logs_df[
-        logs_df['message']
-        .str.contains("login", case=False)
-    ]
-)
-
-# Display metrics
-st.write(f"ERROR Logs: {error_count}")
-st.write(f"CRITICAL Logs: {critical_count}")
-st.write(f"WARNING Logs: {warning_count}")
-st.write(f"Failed Login Events: {failed_login_count}")
-
-# Intelligent log alerts
-
-if critical_count >= 5:
-    st.error(
-        "🚨 High number of CRITICAL system events detected!"
-    )
-
-if error_count >= 5:
-    st.warning(
-        "⚠ Elevated ERROR log frequency detected!"
-    )
-
-if failed_login_count >= 3:
-    st.warning(
-        "⚠ Multiple failed login attempts detected!"
-    )
-
-# -----------------------------------
-# ML-BASED LOG ANOMALY DETECTION
-# -----------------------------------
-
-st.subheader("ML-Based Log Anomaly Detection")
-
-# Create numerical log features
-
-logs_df['is_error'] = (
-    logs_df['level'] == 'ERROR'
-).astype(int)
-
-logs_df['is_critical'] = (
-    logs_df['level'] == 'CRITICAL'
-).astype(int)
-
-logs_df['is_warning'] = (
-    logs_df['level'] == 'WARNING'
-).astype(int)
-
-logs_df['failed_login'] = (
-    logs_df['message']
-    .str.contains("login", case=False)
-).astype(int)
-
-# Feature set
-log_features = logs_df[[
-    'is_error',
-    'is_critical',
-    'is_warning',
-    'failed_login'
-]]
-
-# Train anomaly model
-log_anomaly_model = IsolationForest(
-    contamination=0.2,
-    random_state=42
-)
-
-# Predict anomalies
-logs_df['log_anomaly'] = (
-    log_anomaly_model.fit_predict(log_features)
-)
-
-# Extract anomalous logs
-log_anomalies = logs_df[
-    logs_df['log_anomaly'] == -1
-]
-
-# Show anomalies
-st.write("Detected Log Anomalies")
-
-st.dataframe(
-    log_anomalies[[
-        'timestamp',
-        'level',
-        'message'
-    ]]
-)
-
-# Intelligent alerts
-
-if not log_anomalies.empty:
-
-    st.error(
-        "🚨 AI detected anomalous operational log patterns!"
     )
