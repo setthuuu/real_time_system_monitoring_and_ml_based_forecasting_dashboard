@@ -108,7 +108,7 @@ Streamlit Visualization Dashboard
 
 
 
-(Add screenshot here later)
+![Dashboard](Real-Time-System-Monitoring.png)
 
 
 
